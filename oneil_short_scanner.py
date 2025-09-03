@@ -1,34 +1,29 @@
 """
-Trend Scanner for William O'Neil Short‑Selling Setup
---------------------------------------------------
+ウィリアム・オニール空売りセットアップのトレンドスキャナー
+===========================================
 
-This script scans Japanese equities for the “空売りダイアグラム”
-pattern (a short‑selling setup popularised by William O'Neil) using
-daily price data from the J‑Quants API.  It reproduces, in a
-programmatic way, the structure illustrated in O'Neil's diagram:
-an exhausted uptrend, a high‑volume break below the 50‑day moving
-average, followed by multiple failed rally attempts near the 50‑day
-line and a subsequent breakdown beneath a neckline.
+J-Quants APIを使用して日本株の「空売りダイアグラム」パターン
+（ウィリアム・オニールが提唱した空売り手法）を検出するスクリプトです。
+オニールの図表で示された構造をプログラム的に再現します：
+疲弊した上昇トレンド、50日移動平均線を下回る大商量でのブレイク、
+50日線付近での複数回の戻り失敗、ネックラインを下回る最終的なブレイクダウン。
 
-The core detection logic is implemented in the
-``detect_oneil_short_candidates`` function.  To run a full scan across
-all listed Japanese equities, set your J‑Quants API token in the
-``JQUANTS_TOKEN`` environment variable and execute this file.  The
-results are written to ``oneil_short_candidates.csv`` in the current
-directory.
+コア検出ロジックは ``detect_oneil_short_candidates`` 関数に実装されています。
+全上場日本株に対してフルスキャンを実行するには、J-Quants APIトークンを
+``JQUANTS_TOKEN`` 環境変数に設定し、このファイルを実行してください。
+結果は現在のディレクトリの ``oneil_short_candidates.csv`` に書き込まれます。
 
-Example usage::
+使用例::
 
     export JQUANTS_TOKEN=«your_token_here»
-    python jp_trend_scanner_scan.py
+    python oneil_short_scanner.py
 
-The scan covers all market segments (プライム、スタンダード、グロース) and
-considers roughly the past two years of daily price data.  Thresholds
-for trend strength, volume expansion, rebound count and head‑and‑
-shoulders similarity can be customised via the function arguments.
+スキャンは全市場セグメント（プライム、スタンダード、グロース）をカバーし、
+過去約2年間の日次価格データを考慮します。トレンドの強さ、出来高拡大、
+戻り回数、ヘッドアンドショルダー類似度の閾値は関数引数で調整可能です。
 
-Note: this script depends on the `jquantsapi` package.  Install it
-with ``pip install jquantsapi pandas numpy``.
+注意: このスクリプトは `jquantsapi` パッケージに依存しています。
+``pip install jquantsapi pandas numpy`` でインストールしてください。
 """
 
 from __future__ import annotations
@@ -50,14 +45,11 @@ except ImportError as exc:  # pragma: no cover
 
 
 def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    """Compute the Average True Range (ATR) over *n* periods.
+    """*n*期間における平均真の値幅（ATR）を計算します。
 
-    ATR is used here to normalise price swings so that thresholds scale
-    with volatility.  It is defined as the rolling mean of the True
-    Range (TR), where TR is the maximum of the current high minus low,
-    the absolute difference between the current high and the previous
-    close, and the absolute difference between the current low and
-    previous close.
+    ATRは価格変動を正規化して閾値がボラティリティに応じてスケールするように
+    使用されます。真の値幅（TR）の移動平均として定義され、TRは以下の最大値です：
+    現在の高値-安値、現在の高値と前日終値の絶対差、現在の安値と前日終値の絶対差。
     """
     prev_close = df['Close'].shift(1)
     tr = pd.concat(
@@ -72,12 +64,11 @@ def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
 
 
 def rolling_slope(series: pd.Series, window: int = 50) -> pd.Series:
-    """Compute the slope (β) of a rolling linear regression.
+    """ローリング線形回帰の傾き（β）を計算します。
 
-    For each window of length ``window``, the series is regressed on a
-    sequence 0, 1, 2, … and the slope is returned.  Positive slopes
-    indicate uptrends.  The slope is expressed in units of price per
-    bar.
+    長さ ``window`` の各ウィンドウについて、系列を0, 1, 2, …の系列に
+    回帰させて傾きを返します。正の傾きは上昇トレンドを示します。
+    傾きは1バーあたりの価格単位で表現されます。
     """
     x = np.arange(window)
 
@@ -95,12 +86,12 @@ def rolling_slope(series: pd.Series, window: int = 50) -> pd.Series:
 def local_pivots(
     series: pd.Series, left: int = 3, right: int = 3
 ) -> tuple[List[int], List[int]]:
-    """Identify local maxima and minima in a series.
+    """系列内の局所的な極大・極小を特定します。
 
-    A point ``i`` is considered a local maximum if it equals the
-    maximum of the values in the window ``[i-left, i+right]`` and
-    similarly a local minimum if it equals the minimum of that window.
-    The indices of local highs and lows are returned.
+    点 ``i`` は、ウィンドウ ``[i-left, i+right]`` 内の値の最大値と
+    等しい場合に局所最大と見なされ、同様に、そのウィンドウの最小値と
+    等しい場合に局所最小と見なされます。
+    局所高値と安値のインデックスが返されます。
     """
     highs: List[int] = []
     lows: List[int] = []
@@ -126,53 +117,49 @@ def detect_oneil_short_candidates(
     target_bounce_range: tuple[int, int] = (2, 4),
     hs_tolerance: float = 0.12,
 ) -> List[Dict[str, Any]]:
-    """Detect O'Neil-style short‑selling candidates within a single equity's history.
+    """単一株式の履歴内でオニール式空売り候補を検出します。
 
-    Parameters
+    パラメータ
     ----------
     df : DataFrame
-        A DataFrame containing columns ``Date``, ``Open``, ``High``, ``Low``,
-        ``Close``, ``Volume`` at minimum.  The data must be sorted by date
-        ascending.  Additional columns are ignored.
-    uptrend_weeks : int, default 8
-        Minimum number of weeks for the preceding uptrend.  The stock must
-        have risen by at least ``uptrend_gain`` over this period and the
-        50‑day MA slope must be positive.
-    uptrend_gain : float, default 0.25
-        Minimum gain (as a fraction) over the uptrend window.
-    ma_window : int, default 50
-        The moving average window used to define the key support line.
-    vol_mult : float, default 1.5
-        Factor by which volume on the breakdown day must exceed the
-        ``ma_window``‑period average volume.
-    drop_from_peak_min : float, default 0.10
-        Minimum fractional drop from the recent swing high (B) to the
-        breakdown below the moving average (② in the diagram).
-    drop_days_max : int, default 15
-        Maximum number of trading days between the high (B) and the initial
-        breakdown.  Controls how fast the first decline occurs.
-    ma_band_eps : float, default 0.01
-        Relative tolerance for considering a rebound as touching the MA.
-        A rebound high within ``1+eps`` of the MA is counted.
-    min_bounce_atr : float, default 0.5
-        Minimum rebound amplitude expressed in multiples of ATR.  Filters
-        out noise.
-    target_bounce_range : tuple[int, int], default (2, 4)
-        Acceptable range for the number of failed rebounds underneath the
-        moving average.  Patterns with 2–4 rebounds are favoured.
-    hs_tolerance : float, default 0.12
-        Tolerance for head‑and‑shoulders similarity.  The heights of the
-        left shoulder (A) and right shoulder (C) should be within
-        ``±tolerance`` of the head (B) height.
+        最低限 ``Date``, ``Open``, ``High``, ``Low``, ``Close``, ``Volume``
+        列を含むDataFrame。データは日付昇順でソートされている必要があります。
+        追加の列は無視されます。
+    uptrend_weeks : int, デフォルト 8
+        先行上昇トレンドの最小週数。この期間で株価は最低 ``uptrend_gain``
+        上昇し、50日MA傾きが正である必要があります。
+    uptrend_gain : float, デフォルト 0.25
+        上昇トレンドウィンドウでの最小上昇率（割合）。
+    ma_window : int, デフォルト 50
+        主要サポートラインを定義する移動平均ウィンドウ。
+    vol_mult : float, デフォルト 1.5
+        ブレイクダウン日の出来高が ``ma_window`` 期間平均出来高を
+        超える倍率。
+    drop_from_peak_min : float, デフォルト 0.10
+        最近のスイング高値(B)から移動平均下回りブレイクダウン（図の②）
+        への最小下落率。
+    drop_days_max : int, デフォルト 15
+        高値(B)と初回ブレイクダウン間の最大営業日数。
+        初回下落の速度を制御します。
+    ma_band_eps : float, デフォルト 0.01
+        戻りがMAに触れたと見なす相対的許容範囲。
+        MAの ``1+eps`` 以内の戻り高値がカウントされます。
+    min_bounce_atr : float, デフォルト 0.5
+        ATRの倍数で表現された最小戻り幅。ノイズをフィルタリングします。
+    target_bounce_range : tuple[int, int], デフォルト (2, 4)
+        移動平均下での失敗戻り回数の許容範囲。
+        2-4回戻りのパターンが好まれます。
+    hs_tolerance : float, デフォルト 0.12
+        ヘッドアンドショルダー類似度の許容範囲。左肩(A)と右肩(C)の高さは
+        ヘッド(B)高さの ``±tolerance`` 以内である必要があります。
 
-    Returns
+    戻り値
     -------
     List[dict]
-        A list of candidate patterns.  Each entry contains the dates of
-        the swing high (``B_date``), breakdown (``break_date``), number of
-        rebounds (``bounce_count``), entry signals (``entry_dates``),
-        neckline estimate (``neckline``) and an overall heuristic
-        ``score``.
+        候補パターンのリスト。各エントリにはスイング高値の日付(``B_date``)、
+        ブレイクダウン日付(``break_date``)、戻り回数(``bounce_count``)、
+        エントリーシグナル(``entry_dates``)、ネックライン推定値(``neckline``)、
+        総合ヒューリスティック``score``が含まれます。
     """
     d = df.copy().reset_index(drop=True)
     # Ensure required columns exist
@@ -197,7 +184,6 @@ def detect_oneil_short_candidates(
 
     # Identify local swing highs and lows
     hi_idx, lo_idx = local_pivots(d['Close'], left=3, right=3)
-    hi_idx_set = set(hi_idx)
 
     candidates: List[Dict[str, Any]] = []
     # Iterate over swing highs as potential heads (B)
@@ -317,33 +303,30 @@ def scan_all_equities(
     max_candidates_per_code: int = 1,
     verbose: bool = True,
 ) -> pd.DataFrame:
-    """Scan all equities in the specified market segments for O'Neil patterns.
+    """指定された市場セグメントの全株式でオニールパターンをスキャンします。
 
-    Parameters
+    パラメータ
     ----------
     jq : JQuantsApi
-        An authenticated JQuantsApi client.
+        認証済みJQuantsApiクライアント。
     from_date, to_date : str
-        ISO format strings defining the inclusive date range to fetch daily
-        quotes.  A range of at least two years is recommended to capture
-        sufficient history.
-    markets : list of str, optional
-        Market codes or names to include.  If ``None``, all markets are
-        scanned.  Typical values include ``'プライム'``, ``'スタンダード'`` and
-        ``'グロース'``.  If the API returns market codes in English, adjust
-        accordingly.
-    max_candidates_per_code : int, default 1
-        Maximum number of top patterns to record per security.  Set to
-        ``None`` to record all.
-    verbose : bool, default True
-        If ``True``, progress is printed to stdout.
+        日次株価を取得する包含的日付範囲を定義するISO形式文字列。
+        十分な履歴を捕捉するため最低2年間の範囲が推奨されます。
+    markets : list of str, オプション
+        含める市場コードまたは名前。``None``の場合、全市場がスキャンされます。
+        典型的な値には ``'プライム'``, ``'スタンダード'``, ``'グロース'`` があります。
+        APIが英語で市場コードを返す場合は適宜調整してください。
+    max_candidates_per_code : int, デフォルト 1
+        銘柄ごとに記録する上位パターンの最大数。すべてを記録するには
+        ``None``に設定します。
+    verbose : bool, デフォルト True
+        ``True``の場合、進捗が標準出力に表示されます。
 
-    Returns
+    戻り値
     -------
     DataFrame
-        A table of detected patterns across all securities.  Each row
-        contains ``Code``, ``Market`` and details of a candidate (dates,
-        bounce count, score, etc.).
+        全銘柄で検出されたパターンのテーブル。各行には ``Code``, ``Market``
+        および候補の詳細（日付、戻り回数、スコアなど）が含まれます。
     """
     # Retrieve listing info to obtain codes and market categories
     listing = jq.get_listed_info()
@@ -406,7 +389,7 @@ def scan_all_equities(
 
 
 def main() -> None:
-    """Entry point for command‑line execution."""
+    """コマンドライン実行のエントリーポイント。"""
     token = os.getenv('JQUANTS_TOKEN')
     if not token:
         raise SystemExit(
